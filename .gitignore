@@ -1,3 +1,10 @@
 Data/**
 Data
 env
+input/
+output/
+template/
+.metals
+.vscode
+.bsp
+.scala-build
