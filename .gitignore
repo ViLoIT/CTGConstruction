@@ -3,6 +3,7 @@ Data
 env
 input/
 output/
+output_csv/
 template/
 .metals
 .vscode

@@ -10,7 +10,10 @@ import pandas as pd
 import scipy.sparse as sparse
 from graphviz import Digraph
 from datetime import datetime
-
+import os
+import argparse
+from Joern_Node import NODE
+from queue import Queue
 
 def debug(msg, noheader=False, sep="\t"):
     """Print to console with debug information."""
@@ -36,11 +39,14 @@ def nodelabel2line(label: str):
     nodelabel2line(s)
     >>> '1.0'
     """
+
+    if pd.isna(label):  # ✅ Check if label is NaN (missing)
+        return "UNKNOWN"  # Or return "" or 0 if needed
+    
     try:
         return str(int(label))
     except:
         return label.split(":")[0].split("_")[-1]
-
 
 def randcolor():
     """Generate random color."""
@@ -50,50 +56,58 @@ def randcolor():
 
     return "#%02X%02X%02X" % (r(), r(), r())
 
-
 def get_digraph(nodes, edges, edge_label=True):
-    """Plote digraph given nodes and edges list."""
+    """Plot a digraph given nodes and edges list."""
     dot = Digraph(comment="Combined PDG")
 
-    nodes = [n + [nodelabel2line(n[1])] for n in nodes]
-    colormap = {"": "white"}
-    for n in nodes:
-        if n[2] not in colormap:
-            colormap[n[2]] = randcolor()
+    # ✅ Ensure "lineNumber" column is properly extracted
+    nodes["_label"] = nodes["_label"].fillna("UNKNOWN")  # ✅ Replace NaN with default value
+    nodes["lineNumber"] = nodes["_label"].apply(nodelabel2line)
 
-    for n in nodes:
-        style = {"style": "filled", "fillcolor": colormap[n[2]]}
-        dot.node(str(n[0]), str(n[1]), **style)
-    for e in edges:
+    colormap = {"": "white"}
+
+    # ✅ Iterate properly over DataFrame rows
+    for _, row in nodes.iterrows():
+        if row["lineNumber"] not in colormap:
+            colormap[row["lineNumber"]] = randcolor()
+
+    # ✅ Use `.iterrows()` for node creation
+    for _, row in nodes.iterrows():
+        style = {"style": "filled", "fillcolor": colormap[row["lineNumber"]]}
+        dot.node(str(row["id"]), str(row["node_label"]), **style)
+
+    # ✅ Use `.iterrows()` for edges
+    for _, row in edges.iterrows():
         style = {"color": "black"}
-        if e[2] == "CALL":
+        if row["etype"] == "CALL":
             style["style"] = "solid"
             style["color"] = "purple"
-        elif e[2] == "AST":
+        elif row["etype"] == "AST":
             style["style"] = "solid"
             style["color"] = "black"
-        elif e[2] == "CFG":
+        elif row["etype"] == "CFG":
             style["style"] = "solid"
             style["color"] = "red"
-        elif e[2] == "CDG":
+        elif row["etype"] == "CDG":
             style["style"] = "solid"
             style["color"] = "blue"
-        elif e[2] == "REACHING_DEF":
+        elif row["etype"] == "REACHING_DEF":
             style["style"] = "solid"
             style["color"] = "orange"
-        elif "DDG" in e[2]:
+        elif "DDG" in row["etype"]:
             style["style"] = "dashed"
             style["color"] = "darkgreen"
         else:
             style["style"] = "solid"
             style["color"] = "black"
+
         style["penwidth"] = "1"
         if edge_label:
-            dot.edge(str(e[0]), str(e[1]), e[2], **style)
+            dot.edge(str(row["outnode"]), str(row["innode"]), row["etype"], **style)
         else:
-            dot.edge(str(e[0]), str(e[1]), **style)
-    return dot
+            dot.edge(str(row["outnode"]), str(row["innode"]), **style)
 
+    return dot
 
 def get_node_edges(edges_content, nodes_content, verbose=0):
     """Get node and edges given filepath (must run after run_joern).
@@ -104,10 +118,11 @@ def get_node_edges(edges_content, nodes_content, verbose=0):
     # outfile = outdir / Path(filepath).name
 
     #with open(edges_content, "r") as f:
+    
     edges = json.loads(edges_content)
-    edges = pd.DataFrame(edges, columns=["innode", "outnode", "etype", "dataflow", "change_operation"])
+    # edges = pd.DataFrame(edges, columns=["innode", "outnode", "etype", "dataflow", "change_operation"])
+    edges = pd.DataFrame(edges, columns=["innode", "outnode", "etype", "dataflow"])
     edges = edges.fillna("")
-    # print(edges)
     nodes = json.loads(nodes_content)
     nodes = pd.DataFrame.from_records(nodes)
     if "controlStructureType" not in nodes.columns:
@@ -115,9 +130,11 @@ def get_node_edges(edges_content, nodes_content, verbose=0):
     nodes = nodes.fillna("")
     try:
         nodes = nodes[
-            ["id", "_label", "name", "code", "lineNumber", "controlStructureType", "ALPHA"]
+            # ["id", "_label", "name", "code", "lineNumber", "controlStructureType", "ALPHA"]
+            ["id", "_label", "name", "code", "lineNumber", "controlStructureType"]
         ]
     except Exception as E:
+        print(f"Failed: {E}")
         if verbose > 1:
             debug(f"Failed: {E}")
         return None
@@ -170,20 +187,32 @@ def get_node_edges(edges_content, nodes_content, verbose=0):
     edges.outnode = edges.apply(
         lambda x: f"{x.outnode}_{x.innode}" if x.line_out == "" else x.outnode, axis=1
     )
+    nodes, edges = filterInfo(nodes, edges)
     typemap = nodes[["id", "name"]].set_index("id").to_dict()["name"]
 
     linemap = nodes.set_index("id").to_dict()["lineNumber"]
     for e in edges.itertuples():
         if type(e.outnode) == str:
             lineNum = linemap[e.innode]
-            node_label = f"TYPE_{lineNum}: {typemap[int(e.outnode.split('_')[0])]}"
-            nodes = nodes.append(
-                {"id": e.outnode, "node_label": node_label, "lineNumber": lineNum},
-                ignore_index=True,
-            )
-
+            # node_label = f"TYPE_{lineNum}: {typemap[int(e.outnode.split('_')[0])]}"
+            node_id = e.outnode.split('_')[0]
+            node_name = typemap.get(node_id, "UNKNOWNLONG")
+            if node_name != "UNKNOWNLONG":
+                node_label = f"TYPE_{lineNum}: {node_name}"
+                nodes = nodes.append(
+                    {"id": e.outnode, "node_label": node_label, "lineNumber": lineNum},
+                    ignore_index=True,
+                )
     return nodes, edges
 
+def generate_node_content(nodes):
+    """Generates node content and adds it as a new column."""
+    content = []
+    for i, n in nodes.iterrows():
+        tmp = NODE(nodes.at[i, "id"], nodes.at[i, "_label"], nodes.at[i, "code"], nodes.at[i, "name"])
+        content.append(tmp.print_node())
+    nodes["node_content"] = content
+    return nodes
 
 def plot_node_edges(edges_file, nodes_file, lineNumber: int = -1, filter_edges=[]):
     """Plot node edges given filepath (must run after get_node_edges).
@@ -212,8 +241,6 @@ def plot_node_edges(edges_file, nodes_file, lineNumber: int = -1, filter_edges=[
         edges_new[["outnode", "innode", "etype"]].to_numpy().tolist(),
     )
     dot.render("/tmp/tmp.gv", view=True)
-
-
 
 def neighbour_nodes(nodes, edges, nodeids: list, hop: int = 1, intermediate=True):
     """Given nodes, edges, nodeid, return hop neighbours.
@@ -261,7 +288,6 @@ def neighbour_nodes(nodes, edges, nodeids: list, hop: int = 1, intermediate=True
             neighbours[nodeid] += nodeid_neighbours_from_csr(nodeid)
         return neighbours
 
-
 def rdg(edges, gtype):
     """Reduce graph given type."""
     if gtype == "reftype":
@@ -280,7 +306,6 @@ def rdg(edges, gtype):
             | (edges.etype == "EVAL_TYPE")
             | (edges.etype == "REF")
             ]
-
 
 def assign_line_num_to_local(nodes, edges, code):
     """Assign line number to local variable in CPG."""
@@ -322,7 +347,6 @@ def assign_line_num_to_local(nodes, edges, code):
             continue
     return local_line_map
 
-
 def drop_lone_nodes(nodes, edges):
     """Remove nodes with no edge connections.
 
@@ -332,7 +356,6 @@ def drop_lone_nodes(nodes, edges):
     """
     nodes = nodes[(nodes.id.isin(edges.innode)) | (nodes.id.isin(edges.outnode))]
     return nodes
-
 
 def plot_graph_node_edge_df(
         nodes, edges, nodeids=[], hop=1, drop_lone_nodes=True, edge_label=True
@@ -366,16 +389,224 @@ def plot_graph_node_edge_df(
     )
     dot.render("/tmp/tmp.gv", view=True)
 
+# Function to safely load JSON files
+def load_json_file(filepath):
+    """
+    Safely loads a JSON file and returns its content.
+    Handles missing files, empty files, and JSON parsing errors.
 
-# filepath = "/content/drive/MyDrive/test/test.c"
-# nodes_file = "/content/drive/MyDrive/test/test.c.nodes.json"
-# edges_file = "/content/drive/MyDrive/test/test.c.edges.json"
-# nodes, edges = get_node_edges(filepath, edges_file, nodes_file)
-#
-# print(len(nodes))
-# print(len(edges))
+    :param filepath: Path to the JSON file.
+    :return: JSON string (str) or None if an error occurs.
+    """
+    if not os.path.exists(filepath):
+        print(f"❌ Error: File not found - {filepath}")
+        return None
 
-# dot = get_digraph(nodes, edges)
-# f = open("/content/drive/MyDrive/test/test.c.dot", "a")
-# f.write(str(dot))
-# f.close()
+    if os.path.getsize(filepath) == 0:
+        print(f"⚠️ Warning: Empty file - {filepath}")
+        return None
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)  # Load as a Python object
+            return json.dumps(data)  # Convert back to JSON string
+    except json.JSONDecodeError as e:
+        print(f"❌ Error: Invalid JSON format in {filepath} - {e}")
+        return None
+
+def find_root_node(stmt_edges):
+    outnodes = stmt_edges["outnode"].tolist()
+    innodes = stmt_edges["innode"].tolist()
+    for n in outnodes:
+        if n not in innodes:
+            return n
+
+def aggregate_edges(stmt_nodes, edges):
+    node_ids = stmt_nodes["id"].to_list()
+    stmt_edges = edges[(edges["innode"].isin(node_ids) & edges["outnode"].isin(node_ids)) & (edges["etype"] == "AST")]
+    root = find_root_node(stmt_edges)
+    if root is not None:
+        for n in node_ids:
+            if n != root:
+                edges.loc[(edges["innode"] == n) & (edges["etype"] != "AST"), "innode"] = root
+                edges.loc[(edges["outnode"] == n) & (edges["etype"] != "AST"), "outnode"] = root
+    return edges
+
+def forward_slice_graph(nodes, edges, etype):
+    changed_nodes = nodes["id"].tolist()
+    nodes_in_changed_edges = edges[(edges["etype"] == etype)][
+        "outnode"].tolist()
+    for n in nodes_in_changed_edges:
+        if n not in changed_nodes:
+            changed_nodes.append(n)
+    visited = []
+    q = Queue()
+    for n in changed_nodes:
+        q.put(n)
+    while not q.empty():
+        n_id = q.get()
+        visited.append(n_id)
+        neighbors = edges[(edges["outnode"] == n_id) & (edges["etype"] == etype)]["innode"].to_list()
+        for n in neighbors:
+            if n not in visited:
+                q.put(n)
+    return visited
+
+def backward_slice_graph(nodes, edges, etype):
+    changed_nodes = nodes["id"].tolist()
+    nodes_in_changed_edges = edges[(edges["etype"] == etype)][
+        "innode"].tolist()
+    for n in nodes_in_changed_edges:
+        if n not in changed_nodes:
+            changed_nodes.append(n)
+    visited = []
+    q = Queue()
+    for n in changed_nodes:
+        q.put(n)
+    while not q.empty():
+        n_id = q.get()
+        visited.append(n_id)
+        neighbors = edges[(edges["innode"] == n_id) & (edges["etype"] == etype)]["outnode"].to_list()
+        for n in neighbors:
+            if n not in visited:
+                q.put(n)
+    return visited
+
+def filterInfo(nodes, edges):
+    removed_nodes = nodes[nodes["lineNumber"] == ""]["id"].tolist()
+    nodes = nodes[nodes["lineNumber"] != ""]
+    edges = edges[~edges["innode"].isin(removed_nodes)]
+    edges = edges[~edges["outnode"].isin(removed_nodes)]
+
+    removed_nodes = nodes[nodes["_label"] == "BLOCK"]["id"].tolist()
+    nodes = nodes[nodes["_label"] != "BLOCK"]
+    edges = edges[~edges["innode"].isin(removed_nodes)]
+    edges = edges[~edges["outnode"].isin(removed_nodes)]
+
+    # lineNumbers = nodes.lineNumber.unique()
+
+    # for x in lineNumbers:
+    #     stmt_nodes = nodes[nodes["lineNumber"] == x]
+    #     edges = aggregate_edges(stmt_nodes, edges)
+    # edges = edges[edges.innode != edges.outnode]
+    edges = edges.drop_duplicates(subset=["innode", "outnode", "etype"], keep='first')
+    nodes = nodes.drop_duplicates(subset=["id", 'lineNumber'], keep='first')
+
+    return nodes, edges
+
+def trim(nodes, edges):
+    nodes, edges = filterInfo(nodes, edges)
+    
+    kept_nodes = set()
+
+    visited = forward_slice_graph(nodes, edges, "CDG")
+    kept_nodes.update(visited)
+    visited = backward_slice_graph(nodes, edges, "CDG")
+    kept_nodes.update(visited)
+
+    visited = forward_slice_graph(nodes, edges, "DDG")
+    kept_nodes.update(visited)
+    visited = backward_slice_graph(nodes, edges, "DDG")
+    kept_nodes.update(visited)
+
+    kept_nodes = list(kept_nodes)
+    kept_line_numbers = nodes[nodes["id"].isin(kept_nodes)]["lineNumber"].to_list()
+    nodes = nodes[nodes["lineNumber"].isin(kept_line_numbers)]
+    kept_nodes = nodes["id"].to_list()
+    edges = edges[(edges["innode"].isin(kept_nodes)) | (edges["outnode"].isin(kept_nodes))]
+
+    nodes = drop_lone_nodes(nodes, edges)
+    # # print(len(nodes))
+    nodes = generate_node_content(nodes)
+
+    node_list = nodes["id"].tolist()
+
+    edges = edges[edges["outnode"].isin(node_list)]
+    edges = edges[edges["innode"].isin(node_list)]
+
+    return nodes, edges
+
+# Function to process all JSON files in input folders
+def process_json_files(nodes_folder, edges_folder, output_folder):
+    """Processes all node and edge JSON files, converts them to CSV, and saves them."""
+
+    # Define output folders for nodes and edges inside the output folder
+    output_nodes_folder = os.path.join(output_folder, nodes_folder)
+    output_edges_folder = os.path.join(output_folder, edges_folder)
+
+    # Ensure the output directories exist
+    os.makedirs(output_nodes_folder, exist_ok=True)
+    os.makedirs(output_edges_folder, exist_ok=True)
+
+    # List all node files
+    node_files = [f for f in os.listdir(nodes_folder) if f.endswith(".json")]
+    total_files = len(node_files) 
+
+    for idx, node_file in enumerate(node_files, start=1):
+        base_name = node_file.replace(".nodes.json", "")
+        node_path = os.path.join(nodes_folder, node_file)
+        edge_path = os.path.join(edges_folder, f"{base_name}.edges.json")
+        
+        print(f"📌 Processing file {idx}/{total_files}: {node_file}")
+
+        # Ensure corresponding edge file exists
+        if not os.path.exists(edge_path):
+            print(f"⚠️ Warning: No matching edge file for {node_file}, skipping.")
+            continue
+
+        # Load JSON content
+        nodes_content = load_json_file(node_path)
+        edges_content = load_json_file(edge_path)
+
+        if nodes_content is None or edges_content is None:
+            print(f"❌ Error: Skipping {node_file} due to loading issues.")
+            continue
+
+        # Process data
+        result = get_node_edges(edges_content, nodes_content)
+        if result is None or not isinstance(result, tuple) or len(result) != 2:
+            print(f"❌ Error: `get_node_edges` failed for {node_file}.")
+            continue
+
+        nodes, edges = result
+        nodes, edges = trim(nodes, edges)
+
+        if nodes is not None and edges is not None:
+            print(f"✅ Successfully processed {len(nodes)} nodes and {len(edges)} edges for {base_name}.")
+
+            # Define output file paths
+            nodes_csv_path = os.path.join(output_nodes_folder, f"{base_name}_nodes.csv")
+            edges_csv_path = os.path.join(output_edges_folder, f"{base_name}_edges.csv")
+
+            # Save CSV files
+            nodes.to_csv(nodes_csv_path, index=True)
+            edges.to_csv(edges_csv_path, index=True)
+
+            print(f"📂 Saved CSV:\n  {nodes_csv_path}\n  {edges_csv_path}")
+        else:
+            print(f"❌ Error: `get_node_edges` returned invalid data for {node_file}.")
+            
+# Main function to handle command-line arguments
+def main():
+    start_time = datetime.now()
+    print(f"🚀 Processing started at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    parser = argparse.ArgumentParser(description="Convert JSON files from nodes and edges folders to CSV.")
+    parser.add_argument("nodes_folder", type=str, help="Path to the nodes folder.")
+    parser.add_argument("edges_folder", type=str, help="Path to the edges folder.")
+    parser.add_argument("output_folder", type=str, help="Path to save CSV output.")
+
+    args = parser.parse_args()
+    print(f'Nodes folder: {args.nodes_folder}')
+    print(f'Edges folder: {args.edges_folder}')
+    print(f'CSV folder: {args.output_folder}')
+ 
+    process_json_files(args.nodes_folder, args.edges_folder, args.output_folder)
+    end_time = datetime.now()  # Record end time
+    elapsed_time = end_time - start_time  # Calculate elapsed time
+
+    print(f"✅ Processing completed at {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"⏳ Total execution time: {elapsed_time}")
+
+# Run the script
+if __name__ == "__main__":
+    main()

@@ -1,5 +1,5 @@
 # this project requires joern version 1.1.1193
-backports.zoneinfo==0.2.1
+# backports.zoneinfo==0.2.1
 chainmap==1.0.3
 combomethod==1.0.12
 dateparser==1.1.1
